@@ -92,42 +92,65 @@ export default function BookingApp() {
   const [selectedDate, setSelectedDate] = useState("");
   const [timeSlotId, setTimeSlotId] = useState("");
 
+  // 1) Carregar serviços (uma vez)
   useEffect(() => {
-    const load = async () => {
+    const loadServices = async () => {
       setLoading(true);
       setError("");
       try {
-        const nowIso = new Date().toISOString();
-        const [{ data: servicesData, error: servicesErr }, { data: slotsData, error: slotsErr }] =
-          await Promise.all([
-            supabase.from("services").select("id, name, duration_minutes").order("name"),
-            supabase
-              .from("time_slots")
-              .select("id, start_at, end_at, is_booked")
-              .eq("is_booked", false)
-              .gte("start_at", nowIso)
-              .order("start_at", { ascending: true }),
-          ]);
-
+        const { data: servicesData, error: servicesErr } = await supabase
+          .from("services")
+          .select("id, name, duration_minutes")
+          .order("name");
         if (servicesErr) throw servicesErr;
-        if (slotsErr) throw slotsErr;
-        setServices(servicesData || []);
-        setSlots(slotsData || []);
 
-        // Pré-seleção
-        if ((servicesData || []).length && !serviceId) setServiceId(servicesData[0].id);
-        const grouped = groupSlotsByDateTZ(slotsData || [], TZ);
-        const firstDateKey = Object.keys(grouped)[0];
-        if (firstDateKey && !selectedDate) setSelectedDate(firstDateKey);
+        setServices(servicesData || []);
+        // Pré-seleciona o primeiro serviço
+        if ((servicesData || []).length && !serviceId) {
+          setServiceId(servicesData[0].id);
+        }
       } catch (e) {
-        setError(e.message || "Falha ao carregar dados.");
+        setError(e.message || "Falha ao carregar serviços.");
       } finally {
         setLoading(false);
       }
     };
-    load();
+    loadServices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 2) Carregar slots sempre que o serviço mudar
+  useEffect(() => {
+    const loadSlotsForService = async () => {
+      if (!serviceId) return;
+      setLoading(true);
+      setError("");
+      try {
+        const nowIso = new Date().toISOString();
+        const { data: slotsData, error: slotsErr } = await supabase
+          .from("time_slots")
+          .select("id, service_id, start_at, end_at, is_booked")
+          .eq("service_id", serviceId)
+          .eq("is_booked", false)
+          .gte("start_at", nowIso)
+          .order("start_at", { ascending: true });
+
+        if (slotsErr) throw slotsErr;
+        setSlots(slotsData || []);
+
+        // Pré-seleciona a primeira data disponível do serviço
+        const grouped = groupSlotsByDateTZ(slotsData || [], TZ);
+        const firstDateKey = Object.keys(grouped)[0] || "";
+        setSelectedDate(firstDateKey);
+        setTimeSlotId("");
+      } catch (e) {
+        setError(e.message || "Falha ao carregar horários.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadSlotsForService();
+  }, [serviceId]);
 
   const groupedByDate = useMemo(() => groupSlotsByDateTZ(slots, TZ), [slots]);
   const dateOptions = useMemo(() => Object.keys(groupedByDate), [groupedByDate]);
@@ -159,14 +182,24 @@ export default function BookingApp() {
   };
 
   const refreshSlots = async () => {
+    if (!serviceId) return;
     const { data: slotsData, error: slotsErr } = await supabase
       .from("time_slots")
-      .select("id, start_at, end_at, is_booked")
+      .select("id, service_id, start_at, end_at, is_booked")
+      .eq("service_id", serviceId)
       .eq("is_booked", false)
       .gte("start_at", new Date().toISOString())
       .order("start_at", { ascending: true });
     if (slotsErr) throw slotsErr;
     setSlots(slotsData || []);
+
+    // Se a data atual não tiver mais horários, tente selecionar outra
+    const grouped = groupSlotsByDateTZ(slotsData || [], TZ);
+    if (!grouped[selectedDate]) {
+      const first = Object.keys(grouped)[0] || "";
+      setSelectedDate(first);
+      setTimeSlotId("");
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -241,7 +274,12 @@ export default function BookingApp() {
         <Field label="Serviço *">
           <select
             value={serviceId}
-            onChange={(e) => setServiceId(e.target.value)}
+            onChange={(e) => {
+              setServiceId(e.target.value);
+              // ao trocar de serviço, limpamos data/horário; os slots serão recarregados pelo useEffect
+              setSelectedDate("");
+              setTimeSlotId("");
+            }}
             className="w-full border rounded-md px-3 py-2"
             disabled={loading}
           >
